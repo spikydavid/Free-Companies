@@ -27,6 +27,39 @@ const state = engine.getState();
 // engine.scoreGame() once end condition is reached.
 ```
 
+### Thin API Layer
+
+The app now exposes lightweight session endpoints that keep game state in memory and allow round-by-round execution.
+
+- `POST /api/game/session` -> create a session
+	- Body: `{ "playerIds": ["Player 1", "Player 2"], "seed": 7 }`
+- `GET /api/game/session/:sessionId` -> get current state
+- `POST /api/game/session/:sessionId/round` -> play one round
+	- Body: `{ "auto": true }` (default)
+	- Body: `{ "auto": false, "choices": { ...RoundChoices } }` for manual input
+- `GET /api/game/session/:sessionId/score` -> score current game state
+
+Manual battle mode (FoH_v2-style step-by-step interaction):
+
+- `POST /api/game/session/:sessionId/battle/start`
+	- Body: `{ "playerId": "Player 1", "contractId": "C12" }`
+- `GET /api/game/session/:sessionId/battle` -> current battle state + preview
+- `POST /api/game/session/:sessionId/battle/reroll`
+	- Body: `{ "type": "melee", "index": 0 }`
+- `POST /api/game/session/:sessionId/battle/sacrifice`
+	- Body: `{ "type": "ranged", "index": 1 }`
+- `POST /api/game/session/:sessionId/battle/confirm` -> applies outcome to session state
+
+Manual campaign chain mode (selected contracts resolved battle-by-battle):
+
+- `POST /api/game/session/:sessionId/campaign/start`
+	- Body: `{ "playerId": "Player 1", "contractIds": ["C12", "C17"] }`
+- `GET /api/game/session/:sessionId/campaign` -> current campaign state
+- `POST /api/game/session/:sessionId/battle/start`
+	- For campaign mode, omit `contractId` to start the next contract battle in the active campaign
+
+The home page (`/`) is wired to this API and provides buttons to start a session, play the next round, and fetch scores.
+
 ### Rules Covered
 
 - Setup (bag, initial contracts, awards, starting depots)

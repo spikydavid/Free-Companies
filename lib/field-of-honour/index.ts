@@ -16,4 +16,10 @@ export type {
   RoundResult,
   TroopCounts,
   TroopType,
+  ManualBattlePreview,
+  ManualBattleConfirmResult,
+  ManualCampaignState,
+  ManualBattleRolls,
+  ManualBattleSacrifices,
+  ManualBattleState,
 } from "./types";

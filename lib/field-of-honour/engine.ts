@@ -13,6 +13,9 @@ import type {
   RoleCard,
   RoundChoices,
   RoundResult,
+  ManualBattleState,
+  ManualBattleConfirmResult,
+  ManualCampaignState,
   TroopCounts,
   TroopType,
 } from "./types";
@@ -37,18 +40,29 @@ const BASE_ROLE_SET: RoleCard[] = [
   "RETURN_ALL_ROLES",
 ];
 
-interface BattleRollSummary {
-  dead: TroopCounts;
-  wounded: TroopCounts;
-  strong: TroopCounts;
-  sixes: TroopCounts;
-  totalWild: number;
-  sacrifiable: TroopCounts;
+interface BattleRolls {
+  melee: number[];
+  ranged: number[];
+  mounted: number[];
 }
 
-interface SuccessPlan {
+interface BattleClassification {
+  successes: TroopCounts;
+  wildcard: number;
+  wounded: TroopCounts;
+  dead: TroopCounts;
+}
+
+interface BattlePreview {
+  dead: TroopCounts;
+  wounded: TroopCounts;
+  willSucceed: boolean;
+}
+
+interface FinalizedBattle {
   success: boolean;
-  wildAssigned: TroopCounts;
+  dead: TroopCounts;
+  wounded: TroopCounts;
   sacrifices: TroopCounts;
 }
 
@@ -60,6 +74,33 @@ interface RuntimePlayerState extends PlayerState {
     battlemaster: boolean;
     negotiator: boolean;
   };
+}
+
+interface ManualBattleRuntime {
+  playerId: string;
+  contractId: string;
+  rolls: BattleRolls;
+  sacrifices: {
+    melee: number[];
+    ranged: number[];
+    mounted: number[];
+  };
+  effects: RuntimePlayerState["roundRoleEffects"];
+  equipmentSpent: number;
+}
+
+interface ManualCampaignRuntime {
+  playerId: string;
+  contractIds: string[];
+  currentIndex: number;
+  activeTroops: TroopCounts;
+  campaignCostPaid: number;
+  losses: TroopCounts;
+  wounded: TroopCounts;
+  sacrifices: TroopCounts;
+  successfulContractIds: string[];
+  failedContractIds: string[];
+  completed: boolean;
 }
 
 export class FieldOfHonourEngine {
@@ -84,6 +125,10 @@ export class FieldOfHonourEngine {
   private startPlayerIndex = 0;
 
   private roundNumber = 1;
+
+  private manualBattle: ManualBattleRuntime | null = null;
+
+  private manualCampaign: ManualCampaignRuntime | null = null;
 
   constructor(config: GameConfig) {
     if (config.playerIds.length < 2) {
@@ -173,6 +218,66 @@ export class FieldOfHonourEngine {
     return result;
   }
 
+  playAutoRound(): RoundResult {
+    const order = this.turnOrder().map((player) => player.id);
+    const state = this.getState();
+
+    const roles: Record<string, RoleCard> = {};
+    for (const player of state.players) {
+      roles[player.id] = this.pickAutoRole(player.availableRoles);
+    }
+
+    const depotIndexByPlayer: Record<string, number> = {};
+    order.forEach((playerId, index) => {
+      depotIndexByPlayer[playerId] = index;
+    });
+
+    const contractsAddedByPlayer: Record<string, [string, string]> = {};
+    const addableIds = this.peekNextAddableContractIds(order.length * 2);
+    for (const playerId of order) {
+      const first = addableIds.shift();
+      const second = addableIds.shift();
+      if (!first || !second) {
+        throw new Error("Unable to build auto add-contract choices");
+      }
+      contractsAddedByPlayer[playerId] = [first, second];
+    }
+
+    const availableForDraft = order.flatMap((playerId) => contractsAddedByPlayer[playerId]);
+    const contractDraftChoices: Record<string, [{ contractId: string }, { contractId: string }]> =
+      {};
+    for (const playerId of order) {
+      const first = availableForDraft.shift();
+      const second = availableForDraft.shift();
+      if (!first || !second) {
+        throw new Error("Unable to build auto draft choices");
+      }
+      contractDraftChoices[playerId] = [{ contractId: first }, { contractId: second }];
+    }
+
+    const campaignPlanByPlayer: Record<string, CampaignPlan> = {};
+    for (const player of this.turnOrder()) {
+      const selected = this.pickAutoCampaignContracts(player);
+      campaignPlanByPlayer[player.id] = { contractIds: selected.map((c) => c.id) };
+    }
+
+    const payrollLoanCounts: Record<string, number> = {};
+    for (const playerId of order) {
+      payrollLoanCounts[playerId] = 0;
+    }
+
+    return this.playRound({
+      roles,
+      depotChoiceOrder: order,
+      depotIndexByPlayer,
+      contractsAddedByPlayer,
+      contractDraftChoices,
+      campaignPlanByPlayer,
+      payrollLoanCounts,
+      payrollDisband: {},
+    });
+  }
+
   scoreGame(): FinalScore[] {
     const scores = this.players.map((player) => {
       const renownFromContracts = player.completed.reduce(
@@ -225,11 +330,478 @@ export class FieldOfHonourEngine {
     player.debt -= repayable;
   }
 
+  startManualBattle(
+    playerId: string,
+    contractId: string,
+    effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
+  ): ManualBattleState {
+    const player = this.requirePlayer(playerId);
+    const contract = player.queue.find((item) => item.id === contractId);
+    if (!contract) {
+      throw new Error(`${playerId} cannot start battle for unknown queued contract ${contractId}`);
+    }
+
+    if (!this.hasAtLeast(player.company, contract.requirements)) {
+      throw new Error(`${playerId} does not meet contract eligibility`);
+    }
+
+    const mergedEffects: RuntimePlayerState["roundRoleEffects"] = {
+      surgeon: effects?.surgeon ?? false,
+      forager: false,
+      paymaster: false,
+      battlemaster: effects?.battlemaster ?? false,
+      negotiator: false,
+    };
+
+    this.manualBattle = {
+      playerId,
+      contractId,
+      rolls: this.rollBattle(player.company, mergedEffects),
+      sacrifices: { melee: [], ranged: [], mounted: [] },
+      effects: mergedEffects,
+      equipmentSpent: 0,
+    };
+
+    return this.getManualBattleState();
+  }
+
+  startManualCampaign(playerId: string, contractIds: string[]): ManualCampaignState {
+    const player = this.requirePlayer(playerId);
+    if (contractIds.length < 1 || contractIds.length > 3) {
+      throw new Error("Manual campaign must include 1 to 3 contracts");
+    }
+
+    const selectedContracts = contractIds.map((id) => {
+      const found = player.queue.find((item) => item.id === id);
+      if (!found) {
+        throw new Error(`${playerId} cannot campaign unknown queued contract ${id}`);
+      }
+      return found;
+    });
+
+    const campaignCost = this.computeCampaignCost(selectedContracts, false);
+    if (player.crowns < campaignCost) {
+      throw new Error(`${playerId} cannot pay campaign cost ${campaignCost}`);
+    }
+
+    const cumulativeReq = this.sumRequirements(selectedContracts);
+    if (!this.hasAtLeast(player.company, cumulativeReq)) {
+      throw new Error(`${playerId} does not meet campaign eligibility requirements`);
+    }
+
+    player.crowns -= campaignCost;
+
+    this.manualCampaign = {
+      playerId,
+      contractIds: [...contractIds],
+      currentIndex: 0,
+      activeTroops: { ...player.company },
+      campaignCostPaid: campaignCost,
+      losses: { melee: 0, ranged: 0, mounted: 0 },
+      wounded: { melee: 0, ranged: 0, mounted: 0 },
+      sacrifices: { melee: 0, ranged: 0, mounted: 0 },
+      successfulContractIds: [],
+      failedContractIds: [],
+      completed: false,
+    };
+
+    this.manualBattle = null;
+    return this.getManualCampaignState();
+  }
+
+  getManualCampaignState(): ManualCampaignState {
+    if (!this.manualCampaign) {
+      throw new Error("No manual campaign is active");
+    }
+
+    return {
+      playerId: this.manualCampaign.playerId,
+      contractIds: [...this.manualCampaign.contractIds],
+      currentIndex: this.manualCampaign.currentIndex,
+      campaignCostPaid: this.manualCampaign.campaignCostPaid,
+      activeTroops: { ...this.manualCampaign.activeTroops },
+      losses: { ...this.manualCampaign.losses },
+      wounded: { ...this.manualCampaign.wounded },
+      sacrifices: { ...this.manualCampaign.sacrifices },
+      successfulContractIds: [...this.manualCampaign.successfulContractIds],
+      failedContractIds: [...this.manualCampaign.failedContractIds],
+      completed: this.manualCampaign.completed,
+    };
+  }
+
+  startManualCampaignBattle(
+    effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
+    sendHome?: TroopCounts,
+  ): ManualBattleState {
+    if (!this.manualCampaign || this.manualCampaign.completed) {
+      throw new Error("No active manual campaign to start battle from");
+    }
+
+    const player = this.requirePlayer(this.manualCampaign.playerId);
+    const contractId = this.manualCampaign.contractIds[this.manualCampaign.currentIndex];
+    const contract = player.queue.find((item) => item.id === contractId);
+    if (!contract) {
+      throw new Error("Current campaign contract is no longer in player queue");
+    }
+
+    const toSendHome = sendHome ?? { melee: 0, ranged: 0, mounted: 0 };
+    this.assertValidCounts(toSendHome, "manual campaign send-home counts");
+    if (!this.hasAtLeast(this.manualCampaign.activeTroops, toSendHome)) {
+      throw new Error("Cannot send home more troops than currently campaigning");
+    }
+
+    this.manualCampaign.activeTroops = this.subtractCounts(this.manualCampaign.activeTroops, toSendHome);
+
+    return this.startManualBattleWithTroops(
+      player.id,
+      contract.id,
+      this.manualCampaign.activeTroops,
+      effects,
+    );
+  }
+
+  getManualBattleState(): ManualBattleState {
+    if (!this.manualBattle) {
+      throw new Error("No manual battle is active");
+    }
+
+    const player = this.requirePlayer(this.manualBattle.playerId);
+    const contract = player.queue.find((item) => item.id === this.manualBattle?.contractId);
+    if (!contract) {
+      throw new Error("Manual battle contract is no longer in player queue");
+    }
+
+    const preview = this.previewBattleOutcomeWithSacrifices(
+      contract,
+      this.manualBattle.rolls,
+      this.manualBattle.sacrifices,
+      this.manualBattle.effects,
+    );
+
+    return {
+      playerId: player.id,
+      contractId: contract.id,
+      contractTitle: contract.title,
+      requirements: { ...contract.requirements },
+      rolls: {
+        melee: [...this.manualBattle.rolls.melee],
+        ranged: [...this.manualBattle.rolls.ranged],
+        mounted: [...this.manualBattle.rolls.mounted],
+      },
+      sacrifices: {
+        melee: [...this.manualBattle.sacrifices.melee],
+        ranged: [...this.manualBattle.sacrifices.ranged],
+        mounted: [...this.manualBattle.sacrifices.mounted],
+      },
+      equipmentSpent: this.manualBattle.equipmentSpent,
+      equipmentRemaining: player.equipment,
+      preview,
+    };
+  }
+
+  rerollManualBattleDie(type: TroopType, index: number): ManualBattleState {
+    if (!this.manualBattle) {
+      throw new Error("No manual battle is active");
+    }
+
+    const player = this.requirePlayer(this.manualBattle.playerId);
+    if (player.equipment <= 0) {
+      throw new Error(`${player.id} has no equipment left`);
+    }
+
+    const typedRolls = this.manualBattle.rolls[type];
+    if (index < 0 || index >= typedRolls.length) {
+      throw new Error("Invalid die index");
+    }
+
+    let value = this.rollDie();
+    if (this.manualBattle.effects.battlemaster) {
+      value = Math.min(6, value + 1);
+    }
+
+    typedRolls[index] = value;
+    player.equipment -= 1;
+    this.manualBattle.equipmentSpent += 1;
+    this.manualBattle.sacrifices[type] = this.manualBattle.sacrifices[type].filter((n) => n !== index);
+
+    return this.getManualBattleState();
+  }
+
+  toggleManualBattleSacrifice(type: TroopType, index: number): ManualBattleState {
+    if (!this.manualBattle) {
+      throw new Error("No manual battle is active");
+    }
+
+    const typedRolls = this.manualBattle.rolls[type];
+    if (index < 0 || index >= typedRolls.length) {
+      throw new Error("Invalid die index");
+    }
+
+    const roll = typedRolls[index];
+    if (!this.isSacrificeEligibleRoll(roll, this.manualBattle.effects)) {
+      throw new Error("Die is not eligible for sacrifice");
+    }
+
+    const list = this.manualBattle.sacrifices[type];
+    const pos = list.indexOf(index);
+    if (pos >= 0) {
+      list.splice(pos, 1);
+    } else {
+      list.push(index);
+      list.sort((a, b) => a - b);
+    }
+
+    return this.getManualBattleState();
+  }
+
+  confirmManualBattle(): ManualBattleConfirmResult {
+    if (!this.manualBattle) {
+      throw new Error("No manual battle is active");
+    }
+
+    const battle = this.manualBattle;
+    const player = this.requirePlayer(battle.playerId);
+    const contractIdx = player.queue.findIndex((item) => item.id === battle.contractId);
+    if (contractIdx < 0) {
+      throw new Error("Manual battle contract is no longer in player queue");
+    }
+    const contract = player.queue[contractIdx];
+
+    const finalized = this.finalizeBattleWithSacrifices(
+      contract,
+      battle.rolls,
+      battle.sacrifices,
+      battle.effects,
+    );
+
+    this.removeFromCompany(player, finalized.dead);
+    this.removeFromCompany(player, finalized.sacrifices);
+    this.returnToBag(finalized.dead);
+    this.returnToBag(finalized.sacrifices);
+
+    player.queue.splice(contractIdx, 1);
+
+    let rewardCrowns = 0;
+    let rewardRenown = 0;
+    if (finalized.success) {
+      rewardCrowns = contract.rewardCrowns;
+      rewardRenown = contract.rewardRenown;
+      player.crowns += rewardCrowns;
+      player.completed.push(contract);
+    } else {
+      player.discarded.push(contract);
+      this.discardedContracts.push(contract);
+    }
+
+    let campaignInfo: ManualBattleConfirmResult["campaign"] | undefined;
+
+    if (this.manualCampaign && this.manualCampaign.playerId === player.id) {
+      this.addCounts(this.manualCampaign.losses, finalized.dead);
+      this.addCounts(this.manualCampaign.wounded, finalized.wounded);
+      this.addCounts(this.manualCampaign.sacrifices, finalized.sacrifices);
+
+      this.manualCampaign.activeTroops = this.subtractCounts(
+        this.subtractCounts(this.manualCampaign.activeTroops, finalized.dead),
+        this.addTwoCounts(finalized.wounded, finalized.sacrifices),
+      );
+
+      if (finalized.success) {
+        this.manualCampaign.successfulContractIds.push(contract.id);
+      } else {
+        this.manualCampaign.failedContractIds.push(contract.id);
+      }
+
+      this.manualCampaign.currentIndex += 1;
+      const completed = this.manualCampaign.currentIndex >= this.manualCampaign.contractIds.length;
+
+      if (completed) {
+        this.manualCampaign.completed = true;
+        const equipmentEarnedAtEnd = this.totalTroops(this.manualCampaign.activeTroops);
+        player.equipment += equipmentEarnedAtEnd;
+        campaignInfo = {
+          active: false,
+          completed: true,
+          currentIndex: this.manualCampaign.currentIndex,
+          totalContracts: this.manualCampaign.contractIds.length,
+          equipmentEarnedAtEnd,
+        };
+        this.manualCampaign = null;
+      } else {
+        const nextContractId = this.manualCampaign.contractIds[this.manualCampaign.currentIndex];
+        campaignInfo = {
+          active: true,
+          completed: false,
+          currentIndex: this.manualCampaign.currentIndex,
+          totalContracts: this.manualCampaign.contractIds.length,
+          nextContractId,
+        };
+      }
+    }
+
+    this.manualBattle = null;
+
+    return {
+      success: finalized.success,
+      contractId: contract.id,
+      playerId: player.id,
+      rewardCrowns,
+      rewardRenown,
+      dead: finalized.dead,
+      wounded: finalized.wounded,
+      sacrifices: finalized.sacrifices,
+      campaign: campaignInfo,
+    };
+  }
+
+  private startManualBattleWithTroops(
+    playerId: string,
+    contractId: string,
+    troopsForBattle: TroopCounts,
+    effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
+  ): ManualBattleState {
+    const player = this.requirePlayer(playerId);
+    const contract = player.queue.find((item) => item.id === contractId);
+    if (!contract) {
+      throw new Error(`${playerId} cannot start battle for unknown queued contract ${contractId}`);
+    }
+
+    if (!this.hasAtLeast(troopsForBattle, contract.requirements)) {
+      throw new Error(`${playerId} does not meet contract eligibility with available campaign troops`);
+    }
+
+    const mergedEffects: RuntimePlayerState["roundRoleEffects"] = {
+      surgeon: effects?.surgeon ?? false,
+      forager: false,
+      paymaster: false,
+      battlemaster: effects?.battlemaster ?? false,
+      negotiator: false,
+    };
+
+    this.manualBattle = {
+      playerId,
+      contractId,
+      rolls: this.rollBattle(troopsForBattle, mergedEffects),
+      sacrifices: { melee: [], ranged: [], mounted: [] },
+      effects: mergedEffects,
+      equipmentSpent: 0,
+    };
+
+    return this.getManualBattleState();
+  }
+
   private setupInitialContracts(): void {
     for (const player of this.players) {
       const card = this.drawContractFromTier("A");
       player.queue.push(card);
     }
+  }
+
+  private pickAutoRole(availableRoles: RoleCard[]): RoleCard {
+    const priority: RoleCard[] = [
+      "FORAGER",
+      "PAYMASTER",
+      "SURGEON",
+      "BATTLE_MASTER",
+      "ARMOURER",
+      "RECRUITER",
+      "NEGOTIATOR",
+      "RETURN_ALL_ROLES",
+    ];
+
+    for (const role of priority) {
+      if (availableRoles.includes(role)) {
+        return role;
+      }
+    }
+
+    return "RETURN_ALL_ROLES";
+  }
+
+  private peekNextAddableContractIds(count: number): string[] {
+    const ids: string[] = [];
+    const pointers = { A: 0, B: 0, C: 0 };
+    const tiers: Array<"A" | "B" | "C"> = ["A", "B", "C"];
+
+    while (ids.length < count) {
+      let progressed = false;
+      for (const tier of tiers) {
+        const deck = this.contractsByTier[tier];
+        const pointer = pointers[tier];
+        if (pointer < deck.length) {
+          ids.push(deck[pointer].id);
+          pointers[tier] += 1;
+          progressed = true;
+          if (ids.length >= count) {
+            break;
+          }
+        }
+      }
+
+      if (!progressed) {
+        break;
+      }
+    }
+
+    if (ids.length < count) {
+      throw new Error("Not enough contracts left in decks to fill auto add-contract choices");
+    }
+
+    return ids;
+  }
+
+  private pickAutoCampaignContracts(player: RuntimePlayerState): Contract[] {
+    const candidates = player.queue;
+    if (candidates.length === 0) {
+      throw new Error(`Player ${player.id} has no queued contracts to campaign`);
+    }
+
+    const forager = player.roundRoleEffects.forager;
+    let best: Contract[] = [];
+    let bestValue = Number.NEGATIVE_INFINITY;
+
+    const evaluate = (bundle: Contract[]) => {
+      if (bundle.length === 0 || bundle.length > 3) {
+        return;
+      }
+      const req = this.sumRequirements(bundle);
+      if (!this.hasAtLeast(player.company, req)) {
+        return;
+      }
+
+      const cost = this.computeCampaignCost(bundle, forager);
+      if (cost > player.crowns) {
+        return;
+      }
+
+      const value = bundle.reduce((sum, contract) => {
+        return sum + contract.rewardCrowns + contract.rewardRenown * 3;
+      }, 0);
+
+      if (
+        value > bestValue ||
+        (value === bestValue && bundle.length > best.length)
+      ) {
+        best = bundle;
+        bestValue = value;
+      }
+    };
+
+    const n = candidates.length;
+    for (let i = 0; i < n; i += 1) {
+      evaluate([candidates[i]]);
+      for (let j = i + 1; j < n; j += 1) {
+        evaluate([candidates[i], candidates[j]]);
+        for (let k = j + 1; k < n; k += 1) {
+          evaluate([candidates[i], candidates[j], candidates[k]]);
+        }
+      }
+    }
+
+    if (best.length > 0) {
+      return best;
+    }
+
+    return [candidates[0]];
   }
 
   private setupInitialDepots(): void {
@@ -452,28 +1024,47 @@ export class FieldOfHonourEngine {
 
       activeTroops = this.subtractCounts(activeTroops, sendHome);
 
-      const battleRoll = this.rollBattle(activeTroops, player.roundRoleEffects);
+      const rolls = this.rollBattle(activeTroops, player.roundRoleEffects);
 
-      const rerolls = Math.max(0, plan.rerollsByContract?.[idx] ?? 0);
-      if (rerolls > 0) {
-        if (player.equipment < rerolls) {
+      let rerollsSpent = 0;
+      const forcedRerolls = Math.max(0, plan.rerollsByContract?.[idx] ?? 0);
+      if (forcedRerolls > 0) {
+        if (player.equipment < forcedRerolls) {
           throw new Error(`${player.id} does not have enough equipment for rerolls`);
         }
-        player.equipment -= rerolls;
-        result.equipmentSpent += rerolls;
+        rerollsSpent += this.applyFixedRerolls(
+          rolls,
+          forcedRerolls,
+          player.roundRoleEffects,
+        );
       }
 
-      const successPlan = this.buildSuccessPlan(contract.requirements, battleRoll);
-      const contractSucceeded = successPlan.success;
+      // FoH_v2 AI-style reroll logic: spend equipment while projected to fail,
+      // rerolling lowest-value faces first (1, then 2, then 3).
+      rerollsSpent += this.applyAutoRerollsUntilStable(
+        rolls,
+        player,
+        contract,
+      );
+      player.equipment -= rerollsSpent;
+      result.equipmentSpent += rerollsSpent;
 
-      this.addCounts(result.losses, battleRoll.dead);
-      this.addCounts(result.wounded, battleRoll.wounded);
-      this.addCounts(result.sacrifices, successPlan.sacrifices);
+      const battleResult = this.finalizeBattle(
+        contract,
+        rolls,
+        activeTroops,
+        player.roundRoleEffects,
+      );
+      const contractSucceeded = battleResult.success;
 
-      this.removeFromCompany(player, battleRoll.dead);
-      this.removeFromCompany(player, successPlan.sacrifices);
-      this.returnToBag(battleRoll.dead);
-      this.returnToBag(successPlan.sacrifices);
+      this.addCounts(result.losses, battleResult.dead);
+      this.addCounts(result.wounded, battleResult.wounded);
+      this.addCounts(result.sacrifices, battleResult.sacrifices);
+
+      this.removeFromCompany(player, battleResult.dead);
+      this.removeFromCompany(player, battleResult.sacrifices);
+      this.returnToBag(battleResult.dead);
+      this.returnToBag(battleResult.sacrifices);
 
       const contractResult: CampaignContractResult = {
         contractId: contract.id,
@@ -495,8 +1086,8 @@ export class FieldOfHonourEngine {
       result.contractResults.push(contractResult);
 
       const remainingAfterBattle = this.subtractCounts(
-        this.subtractCounts(activeTroops, battleRoll.dead),
-        this.addTwoCounts(battleRoll.wounded, successPlan.sacrifices),
+        this.subtractCounts(activeTroops, battleResult.dead),
+        this.addTwoCounts(battleResult.wounded, battleResult.sacrifices),
       );
 
       activeTroops = remainingAfterBattle;
@@ -571,15 +1162,8 @@ export class FieldOfHonourEngine {
   private rollBattle(
     troops: TroopCounts,
     effects: RuntimePlayerState["roundRoleEffects"],
-  ): BattleRollSummary {
-    const summary: BattleRollSummary = {
-      dead: { melee: 0, ranged: 0, mounted: 0 },
-      wounded: { melee: 0, ranged: 0, mounted: 0 },
-      strong: { melee: 0, ranged: 0, mounted: 0 },
-      sixes: { melee: 0, ranged: 0, mounted: 0 },
-      totalWild: 0,
-      sacrifiable: { melee: 0, ranged: 0, mounted: 0 },
-    };
+  ): BattleRolls {
+    const rolls: BattleRolls = { melee: [], ranged: [], mounted: [] };
 
     for (const type of this.troopTypes()) {
       const count = troops[type];
@@ -588,86 +1172,349 @@ export class FieldOfHonourEngine {
         if (effects.battlemaster) {
           roll = Math.min(6, roll + 1);
         }
-
-        const deadThreshold = effects.surgeon ? 1 : 2;
-        const woundedThreshold = effects.surgeon ? 2 : 3;
-
-        if (roll <= deadThreshold) {
-          summary.dead[type] += 1;
-          continue;
-        }
-
-        summary.sacrifiable[type] += 1;
-
-        if (roll <= woundedThreshold) {
-          summary.wounded[type] += 1;
-        } else if (roll === 6) {
-          summary.sixes[type] += 1;
-          summary.totalWild += 1;
-        } else {
-          summary.strong[type] += 1;
-        }
+        rolls[type].push(roll);
       }
     }
 
-    return summary;
+    return rolls;
   }
 
-  private buildSuccessPlan(
-    requirements: TroopCounts,
-    battle: BattleRollSummary,
-  ): SuccessPlan {
-    const typeList = this.troopTypes();
-    let best: SuccessPlan | null = null;
-    const totalWild = battle.totalWild;
+  private classifyRolls(
+    rolls: BattleRolls,
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): BattleClassification {
+    const successes: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
+    const wounded: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
+    const dead: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
+    let wildcard = 0;
 
-    for (let meleeWild = 0; meleeWild <= totalWild; meleeWild += 1) {
-      for (let rangedWild = 0; rangedWild <= totalWild - meleeWild; rangedWild += 1) {
-        const mountedWild = totalWild - meleeWild - rangedWild;
-        const wildAssigned: TroopCounts = {
-          melee: meleeWild,
-          ranged: rangedWild,
-          mounted: mountedWild,
-        };
+    const deadThreshold = effects.surgeon ? 1 : 2;
+    const woundedFace = effects.surgeon ? 2 : 3;
 
-        const sacrifices: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
-        let feasible = true;
-
-        for (const type of typeList) {
-          const base = battle.strong[type] + wildAssigned[type];
-          const deficit = Math.max(0, requirements[type] - base);
-          if (deficit > battle.sacrifiable[type]) {
-            feasible = false;
-            break;
-          }
-          sacrifices[type] = deficit;
-        }
-
-        if (!feasible) {
-          continue;
-        }
-
-        const candidate: SuccessPlan = {
-          success: true,
-          wildAssigned,
-          sacrifices,
-        };
-
-        if (!best || this.totalTroops(candidate.sacrifices) < this.totalTroops(best.sacrifices)) {
-          best = candidate;
+    for (const type of this.troopTypes()) {
+      for (const roll of rolls[type]) {
+        if (roll <= deadThreshold) {
+          dead[type] += 1;
+        } else if (roll === woundedFace) {
+          wounded[type] += 1;
+        } else if (roll <= 5) {
+          successes[type] += 1;
+        } else {
+          wildcard += 1;
         }
       }
     }
 
-    if (!best) {
-      return {
-        success: false,
-        wildAssigned: { melee: 0, ranged: 0, mounted: 0 },
-        sacrifices: { melee: 0, ranged: 0, mounted: 0 },
-      };
+    return { successes, wildcard, wounded, dead };
+  }
+
+  private previewBattleOutcome(
+    contract: Contract,
+    rolls: BattleRolls,
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): BattlePreview {
+    const { successes, wildcard: wc, wounded, dead } = this.classifyRolls(rolls, effects);
+    const req = { ...contract.requirements };
+    let remainingWild = wc;
+
+    for (const type of this.troopTypes()) {
+      const use = Math.min(successes[type], req[type]);
+      req[type] -= use;
     }
 
-    return best;
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+      const use = Math.min(req[type], remainingWild);
+      req[type] -= use;
+      remainingWild -= use;
+    }
+
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+
+      const autoSacrifice = this.getAutoSacrificeCounts(rolls[type], effects);
+      const useFromWounded = Math.min(req[type], autoSacrifice.woundedSuccesses);
+      const remainingNeed = req[type] - useFromWounded;
+      const useFromHealthy = Math.min(remainingNeed, autoSacrifice.healthySuccesses);
+      const use = useFromWounded + useFromHealthy;
+
+      req[type] -= use;
+      wounded[type] = Math.max(0, wounded[type] - useFromWounded);
+      dead[type] += use;
+    }
+
+    return {
+      dead,
+      wounded,
+      willSucceed: req.melee + req.ranged + req.mounted === 0,
+    };
+  }
+
+  private finalizeBattle(
+    contract: Contract,
+    rolls: BattleRolls,
+    _availableTroops: TroopCounts,
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): FinalizedBattle {
+    const req = { ...contract.requirements };
+    const { successes, wildcard, wounded, dead } = this.classifyRolls(rolls, effects);
+    let remainingWild = wildcard;
+
+    for (const type of this.troopTypes()) {
+      const use = Math.min(successes[type], req[type]);
+      req[type] -= use;
+    }
+
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+      const use = Math.min(req[type], remainingWild);
+      req[type] -= use;
+      remainingWild -= use;
+    }
+
+    const sacrifices: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+
+      const autoSacrifice = this.getAutoSacrificeCounts(rolls[type], effects);
+      const useFromWounded = Math.min(req[type], autoSacrifice.woundedSuccesses);
+      const remainingNeed = req[type] - useFromWounded;
+      const useFromHealthy = Math.min(remainingNeed, autoSacrifice.healthySuccesses);
+      const use = useFromWounded + useFromHealthy;
+
+      req[type] -= use;
+      sacrifices[type] += use;
+      wounded[type] = Math.max(0, wounded[type] - useFromWounded);
+    }
+
+    return {
+      success: req.melee + req.ranged + req.mounted === 0,
+      dead,
+      wounded,
+      sacrifices,
+    };
+  }
+
+  private previewBattleOutcomeWithSacrifices(
+    contract: Contract,
+    rolls: BattleRolls,
+    sacrifices: { melee: number[]; ranged: number[]; mounted: number[] },
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): { willSucceed: boolean; dead: TroopCounts; wounded: TroopCounts } {
+    const req = { ...contract.requirements };
+    const { successes, wildcard, wounded, dead } = this.classifyRolls(rolls, effects);
+    let remainingWild = wildcard;
+
+    this.applyExplicitSacrifices(successes, wounded, dead, rolls, sacrifices, effects);
+
+    for (const type of this.troopTypes()) {
+      const use = Math.min(successes[type], req[type]);
+      req[type] -= use;
+    }
+
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+
+      const use = Math.min(req[type], remainingWild);
+      req[type] -= use;
+      remainingWild -= use;
+    }
+
+    return {
+      willSucceed: req.melee + req.ranged + req.mounted === 0,
+      dead,
+      wounded,
+    };
+  }
+
+  private finalizeBattleWithSacrifices(
+    contract: Contract,
+    rolls: BattleRolls,
+    sacrifices: { melee: number[]; ranged: number[]; mounted: number[] },
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): FinalizedBattle {
+    const req = { ...contract.requirements };
+    const { successes, wildcard, wounded, dead } = this.classifyRolls(rolls, effects);
+    let remainingWild = wildcard;
+
+    const sacrificeCounts: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
+    this.applyExplicitSacrifices(successes, wounded, dead, rolls, sacrifices, effects, sacrificeCounts);
+
+    for (const type of this.troopTypes()) {
+      const use = Math.min(successes[type], req[type]);
+      req[type] -= use;
+    }
+
+    for (const type of this.troopTypes()) {
+      if (req[type] === 0) {
+        continue;
+      }
+
+      const use = Math.min(req[type], remainingWild);
+      req[type] -= use;
+      remainingWild -= use;
+    }
+
+    return {
+      success: req.melee + req.ranged + req.mounted === 0,
+      dead,
+      wounded,
+      sacrifices: sacrificeCounts,
+    };
+  }
+
+  private applyExplicitSacrifices(
+    successes: TroopCounts,
+    wounded: TroopCounts,
+    dead: TroopCounts,
+    rolls: BattleRolls,
+    sacrifices: { melee: number[]; ranged: number[]; mounted: number[] },
+    effects: RuntimePlayerState["roundRoleEffects"],
+    sacrificeCounts: TroopCounts = { melee: 0, ranged: 0, mounted: 0 },
+  ): void {
+    for (const type of this.troopTypes()) {
+      for (const idx of sacrifices[type]) {
+        const roll = rolls[type][idx];
+        if (roll === undefined || !this.isSacrificeEligibleRoll(roll, effects)) {
+          continue;
+        }
+
+        successes[type] += 1;
+        if (roll === (effects.surgeon ? 2 : 3)) {
+          wounded[type] = Math.max(0, wounded[type] - 1);
+        }
+        dead[type] += 1;
+        sacrificeCounts[type] += 1;
+      }
+    }
+  }
+
+  private isSacrificeEligibleRoll(
+    roll: number,
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): boolean {
+    const woundedFace = effects.surgeon ? 2 : 3;
+    return roll === woundedFace || (roll >= 4 && roll <= 6);
+  }
+
+  private getAutoSacrificeCounts(
+    typeRolls: number[],
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): {
+    woundedSuccesses: number;
+    healthySuccesses: number;
+  } {
+    let woundedSuccesses = 0;
+    let healthySuccesses = 0;
+    const woundedFace = effects.surgeon ? 2 : 3;
+
+    for (const roll of typeRolls) {
+      if (roll === woundedFace) {
+        woundedSuccesses += 1;
+      } else if (roll > woundedFace && roll <= 6) {
+        healthySuccesses += 1;
+      }
+    }
+
+    return { woundedSuccesses, healthySuccesses };
+  }
+
+  private applyFixedRerolls(
+    rolls: BattleRolls,
+    rerolls: number,
+    effects: RuntimePlayerState["roundRoleEffects"],
+  ): number {
+    let spent = 0;
+    const types = this.troopTypes();
+
+    for (let i = 0; i < rerolls; i += 1) {
+      let rerolled = false;
+      for (const face of [1, 2, 3]) {
+        for (const type of types) {
+          const idx = rolls[type].indexOf(face);
+          if (idx === -1) {
+            continue;
+          }
+
+          let value = this.rollDie();
+          if (effects.battlemaster) {
+            value = Math.min(6, value + 1);
+          }
+          rolls[type][idx] = value;
+          spent += 1;
+          rerolled = true;
+          break;
+        }
+        if (rerolled) {
+          break;
+        }
+      }
+
+      if (!rerolled) {
+        break;
+      }
+    }
+
+    return spent;
+  }
+
+  private applyAutoRerollsUntilStable(
+    rolls: BattleRolls,
+    player: RuntimePlayerState,
+    contract: Contract,
+  ): number {
+    const types = this.troopTypes();
+    let spent = 0;
+
+    while (player.equipment - spent > 0) {
+      const preview = this.previewBattleOutcome(
+        contract,
+        rolls,
+        player.roundRoleEffects,
+      );
+      if (preview.willSucceed) {
+        break;
+      }
+
+      let rerolled = false;
+      for (const face of [1, 2, 3]) {
+        for (const type of types) {
+          const idx = rolls[type].indexOf(face);
+          if (idx === -1) {
+            continue;
+          }
+
+          let value = this.rollDie();
+          if (player.roundRoleEffects.battlemaster) {
+            value = Math.min(6, value + 1);
+          }
+          rolls[type][idx] = value;
+          spent += 1;
+          rerolled = true;
+          break;
+        }
+
+        if (rerolled) {
+          break;
+        }
+      }
+
+      if (!rerolled) {
+        break;
+      }
+    }
+
+    return spent;
   }
 
   private computeCampaignCost(contracts: Contract[], forager: boolean): number {

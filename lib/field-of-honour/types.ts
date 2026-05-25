@@ -142,3 +142,66 @@ export interface FinalScore {
   completedContracts: number;
   crowns: number;
 }
+
+export interface ManualBattleRolls {
+  melee: number[];
+  ranged: number[];
+  mounted: number[];
+}
+
+export interface ManualBattleSacrifices {
+  melee: number[];
+  ranged: number[];
+  mounted: number[];
+}
+
+export interface ManualBattlePreview {
+  willSucceed: boolean;
+  dead: TroopCounts;
+  wounded: TroopCounts;
+}
+
+export interface ManualBattleState {
+  playerId: string;
+  contractId: string;
+  contractTitle: string;
+  requirements: TroopCounts;
+  rolls: ManualBattleRolls;
+  sacrifices: ManualBattleSacrifices;
+  equipmentSpent: number;
+  equipmentRemaining: number;
+  preview: ManualBattlePreview;
+}
+
+export interface ManualBattleConfirmResult {
+  success: boolean;
+  contractId: string;
+  playerId: string;
+  rewardCrowns: number;
+  rewardRenown: number;
+  dead: TroopCounts;
+  wounded: TroopCounts;
+  sacrifices: TroopCounts;
+  campaign?: {
+    active: boolean;
+    completed: boolean;
+    currentIndex: number;
+    totalContracts: number;
+    nextContractId?: string;
+    equipmentEarnedAtEnd?: number;
+  };
+}
+
+export interface ManualCampaignState {
+  playerId: string;
+  contractIds: string[];
+  currentIndex: number;
+  campaignCostPaid: number;
+  activeTroops: TroopCounts;
+  losses: TroopCounts;
+  wounded: TroopCounts;
+  sacrifices: TroopCounts;
+  successfulContractIds: string[];
+  failedContractIds: string[];
+  completed: boolean;
+}
