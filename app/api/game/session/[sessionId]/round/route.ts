@@ -35,6 +35,7 @@ export async function POST(request: Request, { params }: Params) {
       roundResult,
       state: session.engine.getState(),
       roundHistory: session.roundHistory,
+      gameEnded: session.engine.gameEnded,
     });
   } catch (error) {
     return NextResponse.json(

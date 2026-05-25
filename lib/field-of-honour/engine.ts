@@ -181,6 +181,12 @@ export class FieldOfHonourEngine {
     this.setupInitialDepots();
   }
 
+  get gameEnded(): boolean {
+    return this.players.some(
+      (player) => player.completed.length >= this.contractWinThreshold,
+    );
+  }
+
   getState(): {
     roundNumber: number;
     startPlayerId: string;
@@ -205,13 +211,12 @@ export class FieldOfHonourEngine {
     this.runPayday(choices.payrollLoanCounts ?? {}, choices.payrollDisband ?? {});
 
     this.startPlayerIndex = (this.startPlayerIndex + 1) % this.players.length;
-    const gameEnded = this.players.some((player) => player.completed.length >= this.contractWinThreshold);
     const result: RoundResult = {
       roundNumber: this.roundNumber,
       campaignResults,
       awardedThisRound,
       startPlayerForNextRound: this.turnOrder()[0].id,
-      gameEnded,
+      gameEnded: this.gameEnded,
     };
     this.roundNumber += 1;
 
@@ -1609,7 +1614,7 @@ export class FieldOfHonourEngine {
 
   private createDepots(count: number): Depot[] {
     return Array.from({ length: count }, () => ({
-      dice: this.drawDiceFromBag(4),
+      dice: this.drawDiceFromBag(Math.min(4, this.bag.length)),
       equipment: 1,
     }));
   }
@@ -1664,6 +1669,12 @@ export class FieldOfHonourEngine {
     if (idx < 0) {
       const requestedCardNumber = this.extractCardNumberFromId(contractId);
       idx = deck.findIndex((contract) => contract.cardNumber === requestedCardNumber);
+      if (idx < 0 && this.replenishTierDeckFromDiscarded(tier)) {
+        idx = deck.findIndex((contract) => contract.id === contractId);
+        if (idx < 0) {
+          idx = deck.findIndex((contract) => contract.cardNumber === requestedCardNumber);
+        }
+      }
     }
     if (idx < 0) {
       throw new Error(`Contract ${contractId} not available in tier ${tier}`);
@@ -1679,6 +1690,9 @@ export class FieldOfHonourEngine {
   private drawContractFromTier(tier: "A" | "B" | "C"): Contract {
     const deck = this.contractsByTier[tier];
     if (deck.length === 0) {
+      this.replenishTierDeckFromDiscarded(tier);
+    }
+    if (deck.length === 0) {
       throw new Error(`Contract deck ${tier} is empty`);
     }
 
@@ -1688,6 +1702,26 @@ export class FieldOfHonourEngine {
     }
 
     return contract;
+  }
+
+  private replenishTierDeckFromDiscarded(tier: "A" | "B" | "C"): boolean {
+    const refill: Contract[] = [];
+
+    for (let i = this.discardedContracts.length - 1; i >= 0; i -= 1) {
+      const contract = this.discardedContracts[i];
+      if (contract.tier !== tier) {
+        continue;
+      }
+      refill.push(contract);
+      this.discardedContracts.splice(i, 1);
+    }
+
+    if (refill.length === 0) {
+      return false;
+    }
+
+    this.contractsByTier[tier].push(...this.shuffle(refill));
+    return true;
   }
 
   private pickRandomAwards(awards: Award[], selectedCount: number): Award[] {

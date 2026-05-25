@@ -16,6 +16,21 @@ interface GameSnapshot {
   players: PlayerState[];
 }
 
+interface PlayerRoundMetrics {
+  playerId: string;
+  crowns: number;
+  melee: number;
+  ranged: number;
+  mounted: number;
+  equipment: number;
+  contracts: number;
+}
+
+interface RoundMetricsPoint {
+  roundNumber: number;
+  players: PlayerRoundMetrics[];
+}
+
 interface SessionPayload {
   sessionId: string;
   state: GameSnapshot;
@@ -33,6 +48,21 @@ interface CampaignPayload {
 }
 
 const createEmptyTroops = (): TroopCounts => ({ melee: 0, ranged: 0, mounted: 0 });
+
+function toRoundMetricsPoint(state: GameSnapshot, roundNumber: number): RoundMetricsPoint {
+  return {
+    roundNumber,
+    players: state.players.map((player) => ({
+      playerId: player.id,
+      crowns: player.crowns,
+      melee: player.company.melee,
+      ranged: player.company.ranged,
+      mounted: player.company.mounted,
+      equipment: player.equipment,
+      contracts: player.completed.length,
+    })),
+  };
+}
 
 function extractCardNumberFromId(contractId: string): number {
   return Number.parseInt(contractId.trim().toUpperCase().replace(/^C/, ""), 10);
@@ -79,10 +109,12 @@ function resolveSelectedCampaignContracts(
 
 export function useGameSession() {
   const [playerCount, setPlayerCount] = useState(2);
+  const [playerTypes, setPlayerTypes] = useState<("human" | "ai")[]>(["ai", "ai"]);
   const [seed, setSeed] = useState(7);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [state, setState] = useState<GameSnapshot | null>(null);
   const [roundHistory, setRoundHistory] = useState<RoundResult[]>([]);
+  const [roundMetrics, setRoundMetrics] = useState<RoundMetricsPoint[]>([]);
   const [scores, setScores] = useState<FinalScore[] | null>(null);
   const [selectedBattlePlayer, setSelectedBattlePlayer] = useState<string>("");
   const [selectedBattleContract, setSelectedBattleContract] = useState<string>("");
@@ -90,8 +122,23 @@ export function useGameSession() {
   const [campaignSendHome, setCampaignSendHome] = useState<TroopCounts>(createEmptyTroops());
   const [manualCampaign, setManualCampaign] = useState<ManualCampaignState | null>(null);
   const [manualBattle, setManualBattle] = useState<ManualBattleState | null>(null);
+  const [gameEnded, setGameEnded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  function updatePlayerCount(count: number) {
+    const clamped = Math.max(2, Math.min(6, count));
+    setPlayerCount(clamped);
+    setPlayerTypes((prev) => {
+      if (clamped > prev.length) {
+        return [
+          ...prev,
+          ...(Array(clamped - prev.length).fill("ai") as ("human" | "ai")[]),
+        ];
+      }
+      return prev.slice(0, clamped);
+    });
+  }
 
   const latestRound = useMemo(
     () => (roundHistory.length > 0 ? roundHistory[roundHistory.length - 1] : null),
@@ -131,6 +178,8 @@ export function useGameSession() {
     setBusy(true);
     setError(null);
     setScores(null);
+    setGameEnded(false);
+    setRoundMetrics([]);
 
     try {
       const playerIds = Array.from({ length: playerCount }, (_, i) => `Player ${i + 1}`);
@@ -147,8 +196,11 @@ export function useGameSession() {
       setSessionId(data.sessionId);
       setState(data.state);
       setRoundHistory(data.roundHistory);
-      setSelectedBattlePlayer(data.state.players[0]?.id ?? "");
-      setSelectedBattleContract(data.state.players[0]?.queue[0]?.id ?? "");
+      setRoundMetrics([toRoundMetricsPoint(data.state, 0)]);
+      const firstHumanId = data.state.players.find((_, i) => playerTypes[i] === "human")?.id;
+      setSelectedBattlePlayer(firstHumanId ?? data.state.players[0]?.id ?? "");
+      const firstHumanQueue = data.state.players.find((_, i) => playerTypes[i] === "human")?.queue;
+      setSelectedBattleContract(firstHumanQueue?.[0]?.id ?? "");
       resetManualSelectionState();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create game session");
@@ -177,6 +229,16 @@ export function useGameSession() {
 
       setState(data.state);
       setRoundHistory(data.roundHistory);
+      const completedRound = data.roundHistory[data.roundHistory.length - 1]?.roundNumber;
+      if (completedRound !== undefined) {
+        setRoundMetrics((prev) => [
+          ...prev,
+          toRoundMetricsPoint(data.state, completedRound),
+        ]);
+      }
+      if ((data as { gameEnded?: boolean }).gameEnded) {
+        setGameEnded(true);
+      }
       if (data.state.players.length > 0 && !selectedBattlePlayer) {
         setSelectedBattlePlayer(data.state.players[0].id);
       }
@@ -292,6 +354,9 @@ export function useGameSession() {
       }
 
       setState(data.state);
+      if ((data as { gameEnded?: boolean }).gameEnded) {
+        setGameEnded(true);
+      }
       setManualBattle(null);
       if (data.result?.campaign?.completed || data.result?.campaign?.active === false) {
         setManualCampaign(null);
@@ -409,11 +474,14 @@ export function useGameSession() {
 
   return {
     playerCount,
-    setPlayerCount,
+    setPlayerCount: updatePlayerCount,
+    playerTypes,
+    setPlayerTypes,
     seed,
     setSeed,
     sessionId,
     state,
+    roundMetrics,
     scores,
     selectedBattlePlayer,
     selectedBattleContract,
@@ -439,5 +507,6 @@ export function useGameSession() {
     startNextCampaignBattle,
     fetchScores,
     selectBattlePlayer,
+    gameEnded,
   };
 }

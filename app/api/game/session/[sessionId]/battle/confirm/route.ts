@@ -19,6 +19,7 @@ export async function POST(_request: Request, { params }: Params) {
       sessionId,
       result,
       state: session?.engine.getState(),
+      gameEnded: session?.engine.gameEnded ?? false,
     });
   } catch (error) {
     return NextResponse.json(
