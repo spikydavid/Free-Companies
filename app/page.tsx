@@ -8,6 +8,7 @@ import type {
   ManualBattleState,
   PlayerState,
   RoundResult,
+  TroopCounts,
   TroopType,
 } from "@/lib/field-of-honour";
 
@@ -34,6 +35,7 @@ interface CampaignPayload {
 }
 
 export default function Home() {
+  const emptyTroops: TroopCounts = { melee: 0, ranged: 0, mounted: 0 };
   const [playerCount, setPlayerCount] = useState(2);
   const [seed, setSeed] = useState(7);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export default function Home() {
   const [selectedBattlePlayer, setSelectedBattlePlayer] = useState<string>("");
   const [selectedBattleContract, setSelectedBattleContract] = useState<string>("");
   const [selectedCampaignContracts, setSelectedCampaignContracts] = useState<string[]>([]);
+  const [campaignSendHome, setCampaignSendHome] = useState<TroopCounts>(emptyTroops);
   const [manualCampaign, setManualCampaign] = useState<ManualCampaignState | null>(null);
   const [manualBattle, setManualBattle] = useState<ManualBattleState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +79,7 @@ export default function Home() {
       setSelectedBattlePlayer(data.state.players[0]?.id ?? "");
       setSelectedBattleContract(data.state.players[0]?.queue[0]?.id ?? "");
       setSelectedCampaignContracts([]);
+      setCampaignSendHome(emptyTroops);
       setManualCampaign(null);
       setManualBattle(null);
     } catch (err) {
@@ -109,6 +113,7 @@ export default function Home() {
         setSelectedBattlePlayer(data.state.players[0].id);
       }
       setSelectedCampaignContracts([]);
+      setCampaignSendHome(emptyTroops);
       setManualCampaign(null);
       setManualBattle(null);
     } catch (err) {
@@ -263,6 +268,7 @@ export default function Home() {
       }
 
       setManualCampaign(data.campaign);
+      setCampaignSendHome(emptyTroops);
       setManualBattle(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start manual campaign");
@@ -282,7 +288,7 @@ export default function Home() {
       const res = await fetch(`/api/game/session/${sessionId}/battle/start`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ sendHome: campaignSendHome }),
       });
       const data = (await res.json()) as BattlePayload;
       if (!res.ok || !data.battle) {
@@ -290,6 +296,7 @@ export default function Home() {
       }
 
       setManualBattle(data.battle);
+      setCampaignSendHome(emptyTroops);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start next campaign battle");
     } finally {
@@ -491,6 +498,7 @@ export default function Home() {
                     const queue = state.players.find((item) => item.id === nextPlayer)?.queue ?? [];
                     setSelectedBattleContract(queue[0]?.id ?? "");
                     setSelectedCampaignContracts([]);
+                    setCampaignSendHome(emptyTroops);
                     setManualCampaign(null);
                     setManualBattle(null);
                   }}
@@ -579,6 +587,37 @@ export default function Home() {
                 >
                   Start Next Campaign Battle
                 </button>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-zinc-300 bg-white p-3">
+                <p className="text-xs font-medium text-zinc-800">Send troops home before next campaign battle</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  {(["melee", "ranged", "mounted"] as TroopType[]).map((type) => {
+                    const max = manualCampaign?.activeTroops[type] ?? 0;
+                    return (
+                      <label key={`send-home-${type}`} className="flex flex-col gap-1 text-xs">
+                        <span className="uppercase tracking-wide text-zinc-700">{type}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={max}
+                          value={campaignSendHome[type]}
+                          onChange={(e) => {
+                            const raw = Number(e.target.value);
+                            const safeValue = Number.isFinite(raw) ? Math.max(0, Math.min(max, Math.floor(raw))) : 0;
+                            setCampaignSendHome((prev) => ({
+                              ...prev,
+                              [type]: safeValue,
+                            }));
+                          }}
+                          disabled={!manualCampaign || manualCampaign.completed || busy}
+                          className="w-full rounded-lg border border-zinc-300 bg-zinc-50 px-2 py-1"
+                        />
+                        <span className="text-[11px] text-zinc-600">Max {max}</span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
               {manualCampaign ? (
