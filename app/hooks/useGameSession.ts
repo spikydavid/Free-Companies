@@ -140,8 +140,8 @@ function resolveSelectedCampaignContracts(
 }
 
 export function useGameSession() {
-  const [playerCount, setPlayerCount] = useState(2);
-  const [playerTypes, setPlayerTypes] = useState<("human" | "ai")[]>(["ai", "ai"]);
+  const [playerCount, setPlayerCount] = useState(4);
+  const [playerTypes, setPlayerTypes] = useState<("human" | "ai")[]>(["ai", "ai", "ai", "ai"]);
   const [seed, setSeed] = useState(7);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [state, setState] = useState<GameSnapshot | null>(null);
@@ -302,7 +302,11 @@ export function useGameSession() {
       }
       resetManualSelectionState();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to play round");
+      const message = err instanceof Error ? err.message : "Failed to play round";
+      setError(message);
+      if (message.includes("Not enough contracts left in decks to fill auto add-contract choices")) {
+        setGameEnded(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -531,7 +535,7 @@ export function useGameSession() {
   }
 
   useEffect(() => {
-    if (!sessionId || !state || busy || gameEnded || hasHumanPlayers) {
+    if (!sessionId || !state || busy || gameEnded || hasHumanPlayers || !!error) {
       return;
     }
 
@@ -542,7 +546,7 @@ export function useGameSession() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [sessionId, state, busy, gameEnded, hasHumanPlayers, playRound]);
+  }, [sessionId, state, busy, gameEnded, hasHumanPlayers, error, playRound]);
 
   return {
     playerCount,
