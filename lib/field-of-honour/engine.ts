@@ -336,7 +336,7 @@ export class FieldOfHonourEngine {
     effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
   ): ManualBattleState {
     const player = this.requirePlayer(playerId);
-    const contract = player.queue.find((item) => item.id === contractId);
+    const contract = this.findQueuedContract(player, contractId);
     if (!contract) {
       throw new Error(`${playerId} cannot start battle for unknown queued contract ${contractId}`);
     }
@@ -345,22 +345,7 @@ export class FieldOfHonourEngine {
       throw new Error(`${playerId} does not meet contract eligibility`);
     }
 
-    const mergedEffects: RuntimePlayerState["roundRoleEffects"] = {
-      surgeon: effects?.surgeon ?? false,
-      forager: false,
-      paymaster: false,
-      battlemaster: effects?.battlemaster ?? false,
-      negotiator: false,
-    };
-
-    this.manualBattle = {
-      playerId,
-      contractId,
-      rolls: this.rollBattle(player.company, mergedEffects),
-      sacrifices: { melee: [], ranged: [], mounted: [] },
-      effects: mergedEffects,
-      equipmentSpent: 0,
-    };
+    this.initializeManualBattle(player.id, contract.id, player.company, effects);
 
     return this.getManualBattleState();
   }
@@ -372,7 +357,7 @@ export class FieldOfHonourEngine {
     }
 
     const selectedContracts = contractIds.map((id) => {
-      const found = player.queue.find((item) => item.id === id);
+      const found = this.findQueuedContract(player, id);
       if (!found) {
         throw new Error(`${playerId} cannot campaign unknown queued contract ${id}`);
       }
@@ -393,7 +378,7 @@ export class FieldOfHonourEngine {
 
     this.manualCampaign = {
       playerId,
-      contractIds: [...contractIds],
+      contractIds: selectedContracts.map((contract) => contract.id),
       currentIndex: 0,
       activeTroops: { ...player.company },
       campaignCostPaid: campaignCost,
@@ -439,7 +424,7 @@ export class FieldOfHonourEngine {
 
     const player = this.requirePlayer(this.manualCampaign.playerId);
     const contractId = this.manualCampaign.contractIds[this.manualCampaign.currentIndex];
-    const contract = player.queue.find((item) => item.id === contractId);
+    const contract = this.findQueuedContract(player, contractId);
     if (!contract) {
       throw new Error("Current campaign contract is no longer in player queue");
     }
@@ -466,7 +451,7 @@ export class FieldOfHonourEngine {
     }
 
     const player = this.requirePlayer(this.manualBattle.playerId);
-    const contract = player.queue.find((item) => item.id === this.manualBattle?.contractId);
+    const contract = this.findQueuedContract(player, this.manualBattle.contractId);
     if (!contract) {
       throw new Error("Manual battle contract is no longer in player queue");
     }
@@ -561,7 +546,7 @@ export class FieldOfHonourEngine {
 
     const battle = this.manualBattle;
     const player = this.requirePlayer(battle.playerId);
-    const contractIdx = player.queue.findIndex((item) => item.id === battle.contractId);
+    const contractIdx = this.findQueuedContractIndex(player, battle.contractId);
     if (contractIdx < 0) {
       throw new Error("Manual battle contract is no longer in player queue");
     }
@@ -660,7 +645,7 @@ export class FieldOfHonourEngine {
     effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
   ): ManualBattleState {
     const player = this.requirePlayer(playerId);
-    const contract = player.queue.find((item) => item.id === contractId);
+    const contract = this.findQueuedContract(player, contractId);
     if (!contract) {
       throw new Error(`${playerId} cannot start battle for unknown queued contract ${contractId}`);
     }
@@ -669,14 +654,30 @@ export class FieldOfHonourEngine {
       throw new Error(`${playerId} does not meet contract eligibility with available campaign troops`);
     }
 
-    const mergedEffects: RuntimePlayerState["roundRoleEffects"] = {
+    this.initializeManualBattle(player.id, contract.id, troopsForBattle, effects);
+
+    return this.getManualBattleState();
+  }
+
+  private createManualBattleEffects(
+    effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
+  ): RuntimePlayerState["roundRoleEffects"] {
+    return {
       surgeon: effects?.surgeon ?? false,
       forager: false,
       paymaster: false,
       battlemaster: effects?.battlemaster ?? false,
       negotiator: false,
     };
+  }
 
+  private initializeManualBattle(
+    playerId: string,
+    contractId: string,
+    troopsForBattle: TroopCounts,
+    effects?: Partial<RuntimePlayerState["roundRoleEffects"]>,
+  ): void {
+    const mergedEffects = this.createManualBattleEffects(effects);
     this.manualBattle = {
       playerId,
       contractId,
@@ -685,8 +686,6 @@ export class FieldOfHonourEngine {
       effects: mergedEffects,
       equipmentSpent: 0,
     };
-
-    return this.getManualBattleState();
   }
 
   private setupInitialContracts(): void {
@@ -935,7 +934,7 @@ export class FieldOfHonourEngine {
 
         const idx = this.availableContractsThisRound.findIndex(
           (entry) =>
-            entry.contract.id === draftChoice.contractId &&
+            this.contractIdMatches(entry.contract.id, draftChoice.contractId) &&
             (!entry.restrictedToPlayerId || entry.restrictedToPlayerId === player.id),
         );
 
@@ -983,7 +982,7 @@ export class FieldOfHonourEngine {
 
     const activeContracts: Contract[] = [];
     for (const id of plan.contractIds) {
-      const idx = player.queue.findIndex((c) => c.id === id);
+      const idx = player.queue.findIndex((contract) => this.contractIdMatches(contract.id, id));
       if (idx < 0) {
         throw new Error(`${player.id} cannot campaign unknown queued contract ${id}`);
       }
@@ -1635,7 +1634,7 @@ export class FieldOfHonourEngine {
   }
 
   private inferTierFromId(contractId: string): "A" | "B" | "C" {
-    const numeric = Number.parseInt(contractId.replace(/^C/, ""), 10);
+    const numeric = this.extractCardNumberFromId(contractId);
     if (!Number.isFinite(numeric)) {
       throw new Error(`Cannot infer tier from contract id ${contractId}`);
     }
@@ -1650,7 +1649,11 @@ export class FieldOfHonourEngine {
 
   private drawSpecificContract(tier: "A" | "B" | "C", contractId: string): Contract {
     const deck = this.contractsByTier[tier];
-    const idx = deck.findIndex((contract) => contract.id === contractId);
+    let idx = deck.findIndex((contract) => contract.id === contractId);
+    if (idx < 0) {
+      const requestedCardNumber = this.extractCardNumberFromId(contractId);
+      idx = deck.findIndex((contract) => contract.cardNumber === requestedCardNumber);
+    }
     if (idx < 0) {
       throw new Error(`Contract ${contractId} not available in tier ${tier}`);
     }
@@ -1774,6 +1777,41 @@ export class FieldOfHonourEngine {
   private takeLoan(player: RuntimePlayerState): void {
     player.crowns += 10;
     player.debt += 1;
+  }
+
+  private normalizeContractId(contractId: string): string {
+    return contractId.trim().toUpperCase();
+  }
+
+  private extractCardNumberFromId(contractId: string): number {
+    return Number.parseInt(contractId.replace(/^C/i, ""), 10);
+  }
+
+  private findQueuedContract(
+    player: RuntimePlayerState,
+    contractId: string,
+  ): Contract | undefined {
+    return player.queue.find((contract) => this.contractIdMatches(contract.id, contractId));
+  }
+
+  private findQueuedContractIndex(
+    player: RuntimePlayerState,
+    contractId: string,
+  ): number {
+    return player.queue.findIndex((contract) => this.contractIdMatches(contract.id, contractId));
+  }
+
+  private contractIdMatches(availableId: string, requestedId: string): boolean {
+    const normalizedAvailableId = this.normalizeContractId(availableId);
+    const normalizedRequestedId = this.normalizeContractId(requestedId);
+    if (normalizedAvailableId === normalizedRequestedId) {
+      return true;
+    }
+
+    return (
+      this.extractCardNumberFromId(normalizedAvailableId) ===
+      this.extractCardNumberFromId(normalizedRequestedId)
+    );
   }
 
   private rollDie(): number {

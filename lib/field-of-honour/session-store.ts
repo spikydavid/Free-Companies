@@ -19,6 +19,14 @@ export interface GameSession {
 
 const sessions = new Map<string, GameSession>();
 
+function requireSession(sessionId: string): GameSession {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error("Session not found");
+  }
+  return session;
+}
+
 function seededRandom(seed: number): () => number {
   let s = seed >>> 0;
   return () => {
@@ -55,10 +63,7 @@ export function playSessionRound(
   sessionId: string,
   options?: { auto?: boolean; choices?: RoundChoices },
 ): RoundResult {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   const auto = options?.auto ?? true;
   let roundResult: RoundResult;
@@ -73,10 +78,7 @@ export function playSessionRound(
 }
 
 export function scoreSession(sessionId: string) {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.scoreGame();
 }
@@ -86,19 +88,13 @@ export function startManualBattleSession(
   playerId: string,
   contractId: string,
 ): ManualBattleState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.startManualBattle(playerId, contractId);
 }
 
 export function getManualBattleSession(sessionId: string): ManualBattleState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.getManualBattleState();
 }
@@ -108,10 +104,7 @@ export function rerollManualBattleSession(
   type: TroopType,
   index: number,
 ): ManualBattleState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.rerollManualBattleDie(type, index);
 }
@@ -121,19 +114,13 @@ export function toggleManualBattleSacrificeSession(
   type: TroopType,
   index: number,
 ): ManualBattleState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.toggleManualBattleSacrifice(type, index);
 }
 
 export function confirmManualBattleSession(sessionId: string): ManualBattleConfirmResult {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.confirmManualBattle();
 }
@@ -143,19 +130,13 @@ export function startManualCampaignSession(
   playerId: string,
   contractIds: string[],
 ): ManualCampaignState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.startManualCampaign(playerId, contractIds);
 }
 
 export function getManualCampaignSession(sessionId: string): ManualCampaignState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.getManualCampaignState();
 }
@@ -164,10 +145,7 @@ export function startManualCampaignBattleSession(
   sessionId: string,
   sendHome?: TroopCounts,
 ): ManualBattleState {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Session not found");
-  }
+  const session = requireSession(sessionId);
 
   return session.engine.startManualCampaignBattle(undefined, sendHome);
 }

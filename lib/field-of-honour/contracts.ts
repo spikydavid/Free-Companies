@@ -102,6 +102,23 @@ function parseRowToContract(row: string[], headerMap: Record<string, number>): C
   };
 }
 
+function expandContractCopies(contract: Contract): Contract[] {
+  if (contract.copies <= 1) {
+    return [{ ...contract, copies: 1 }];
+  }
+
+  const expanded: Contract[] = [];
+  for (let copyNumber = 1; copyNumber <= contract.copies; copyNumber += 1) {
+    expanded.push({
+      ...contract,
+      id: copyNumber === 1 ? contract.id : `${contract.id}-${copyNumber}`,
+      copies: 1,
+    });
+  }
+
+  return expanded;
+}
+
 export function parseContractsCsv(csvText: string): Contract[] {
   const rows = csvText
     .split(/\r?\n/)
@@ -149,7 +166,7 @@ export function parseContractsCsv(csvText: string): Contract[] {
       continue;
     }
 
-    contracts.push(contract);
+    contracts.push(...expandContractCopies(contract));
   }
 
   return contracts;

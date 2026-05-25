@@ -19,7 +19,8 @@ interface StartBattleBody {
 
 export async function POST(request: Request, { params }: Params) {
   const { sessionId } = await params;
-  if (!getSession(sessionId)) {
+  const session = getSession(sessionId);
+  if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 
@@ -33,8 +34,25 @@ export async function POST(request: Request, { params }: Params) {
         );
       }
 
-      const battle = startManualBattleSession(sessionId, body.playerId, body.contractId);
-      return NextResponse.json({ sessionId, battle });
+      try {
+        const battle = startManualBattleSession(sessionId, body.playerId, body.contractId);
+        return NextResponse.json({ sessionId, battle });
+      } catch (error) {
+        const player = session.engine.getState().players.find((item) => item.id === body.playerId);
+        const queuedContractIds = player?.queue.map((contract) => contract.id) ?? [];
+        return NextResponse.json(
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : "Failed to start manual battle",
+            playerId: body.playerId,
+            requestedContractId: body.contractId,
+            queuedContractIds,
+          },
+          { status: 400 },
+        );
+      }
     }
 
     const battle = startManualCampaignBattleSession(sessionId, body.sendHome);
