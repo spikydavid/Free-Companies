@@ -157,7 +157,7 @@ export class FieldOfHonourEngine {
 
     this.players = config.playerIds.map((id) => ({
       id,
-      crowns: config.startCrowns ?? 20,
+      crowns: config.startCrowns ?? 0,
       debt: 0,
       renownFromAwards: 0,
       equipment: 0,

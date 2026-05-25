@@ -124,7 +124,13 @@ export default function Home() {
   }
 
   async function startManualBattle() {
-    if (!sessionId || !selectedBattlePlayer || !selectedBattleContract) {
+    const effectiveSelectedBattleContract = selectedPlayerContracts.some(
+      (contract) => contract.id === selectedBattleContract,
+    )
+      ? selectedBattleContract
+      : selectedPlayerContracts[0]?.id ?? "";
+
+    if (!sessionId || !selectedBattlePlayer || !effectiveSelectedBattleContract) {
       return;
     }
 
@@ -136,7 +142,7 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           playerId: selectedBattlePlayer,
-          contractId: selectedBattleContract,
+          contractId: effectiveSelectedBattleContract,
         }),
       });
       const data = (await res.json()) as BattlePayload;
@@ -304,13 +310,16 @@ export default function Home() {
     }
   }
 
-  const selectedPlayerContracts = useMemo(() => {
-    if (!state || !selectedBattlePlayer) {
-      return [];
-    }
-    const player = state.players.find((item) => item.id === selectedBattlePlayer);
-    return player?.queue ?? [];
-  }, [state, selectedBattlePlayer]);
+  const selectedPlayerContracts =
+    state && selectedBattlePlayer
+      ? state.players.find((item) => item.id === selectedBattlePlayer)?.queue ?? []
+      : [];
+
+  const effectiveSelectedBattleContract = selectedPlayerContracts.some(
+    (contract) => contract.id === selectedBattleContract,
+  )
+    ? selectedBattleContract
+    : selectedPlayerContracts[0]?.id ?? "";
 
   async function fetchScores() {
     if (!sessionId) {
@@ -515,7 +524,7 @@ export default function Home() {
               <label className="flex flex-col gap-1 text-sm">
                 Contract
                 <select
-                  value={selectedBattleContract}
+                  value={effectiveSelectedBattleContract}
                   onChange={(e) => setSelectedBattleContract(e.target.value)}
                   className="min-w-64 rounded-xl border border-zinc-400 bg-white px-3 py-2"
                 >
@@ -533,7 +542,7 @@ export default function Home() {
 
               <button
                 onClick={startManualBattle}
-                disabled={busy || !selectedBattlePlayer || !selectedBattleContract}
+                disabled={busy || !selectedBattlePlayer || !effectiveSelectedBattleContract}
                 className="rounded-xl bg-indigo-700 px-5 py-2 text-sm font-medium text-indigo-50 hover:bg-indigo-600 disabled:opacity-60"
               >
                 Start Battle
